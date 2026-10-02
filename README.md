@@ -310,6 +310,8 @@ Isso significa que cerca de 27 em cada 100 reservas analisadas estão classifica
 
 O resultado final foi disponibilizado no Power BI com cinco indicadores principais, filtros e quatro análises complementares.
 
+[📥 Baixar arquivo Power BI (.pbix)](./Hotel-Booking.pbix)
+
 ![Dashboard Power BI]<img width="745" height="412" alt="dashboard" src="https://github.com/user-attachments/assets/93b9dd26-5c86-447e-befe-13fe552555df" />
 
 
