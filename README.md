@@ -14,6 +14,15 @@ Construir uma solução de dados de ponta a ponta capaz de:
 - disponibilizar consultas analíticas por meio de views de negócio;
 - alimentar um dashboard no Power BI com indicadores operacionais e comerciais.
 
+## 🔎 Análise Exploratória dos Dados (EDA)
+
+Antes da construção do pipeline, foi realizada uma Análise Exploratória dos Dados (EDA) utilizando Google Colab e Python.
+
+O objetivo foi compreender a estrutura do dataset, identificar padrões, distribuição das principais variáveis, valores ausentes, possíveis duplicidades e comportamentos anômalos que poderiam impactar as etapas posteriores de transformação e análise.
+
+A EDA também serviu como base para definir algumas das regras de Data Quality aplicadas posteriormente na camada Silver, especialmente na identificação de valores extremos de ADR e ocupação.
+
+[📓 Ver notebook de EDA no Google Colab](https://colab.research.google.com/drive/1EaDnK8GPcvpUWB-CGvQSyyGugwNYFczg?usp=sharing)
 ---
 
 ## 🏗️ Arquitetura
@@ -92,8 +101,9 @@ Além de ser utilizada nas análises, a regra também é validada na etapa de Da
 ---
 
 ## 🧪 Data Quality
+As regras de qualidade não foram definidas apenas com base em validações técnicas. A Análise Exploratória dos Dados realizada previamente também foi utilizada para identificar comportamentos anômalos e apoiar a definição das regras aplicadas na Silver.
 
-A qualidade dos dados é tratada em duas etapas: durante o ETL, para classificação e tratamento dos registros, e posteriormente no Redshift, para validar a integridade da tabela Silver.
+Dessa forma, a EDA funcionou como uma etapa de investigação que ajudou a diferenciar valores potencialmente inválidos de situações que poderiam representar comportamentos legítimos do dataset.
 
 ### Tratamento e classificação
 
