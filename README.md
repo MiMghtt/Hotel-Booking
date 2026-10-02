@@ -1,426 +1,376 @@
 # Hotel Booking Data Pipeline
 
-Projeto de engenharia e análise de dados desenvolvido a partir de um dataset de reservas de hotéis.
+Pipeline de dados desenvolvido para transformar dados de reservas hoteleiras em uma camada analítica estruturada, com processamento em Python, armazenamento e modelagem no Amazon Redshift e visualização no Power BI.
 
-O fluxo transforma os dados brutos em uma camada analítica no Amazon Redshift, aplica regras de qualidade, organiza os dados em um modelo dimensional e disponibiliza indicadores e análises no Power BI.
+## 🎯 Objetivo
 
-## Arquitetura
+Construir uma solução de dados de ponta a ponta capaz de:
 
-### Fluxo utilizado
+- ingerir dados brutos de reservas;
+- aplicar limpeza, padronização e transformações;
+- criar campos derivados para análise;
+- aplicar regras de qualidade e rastrear registros inválidos;
+- organizar os dados em um modelo dimensional;
+- disponibilizar consultas analíticas por meio de views de negócio;
+- alimentar um dashboard no Power BI com indicadores operacionais e comerciais.
+
+---
+
+## 🏗️ Arquitetura
+
+<img width="2043" height="770" alt="architecture" src="https://github.com/user-attachments/assets/7ec9e9e8-c679-457b-9663-587e7dd68f64" />
+
+---
+
+## 🔄 ETL e criação dos campos derivados
+
+Após a leitura e padronização do dataset, o ETL cria campos derivados que não existiam originalmente na fonte. Essas colunas transformam informações operacionais em atributos prontos para análises de período, ocupação e receita.
+
+### `arrival_date`
+
+```python
+df = create_arrival_date(df)
+```
+
+Combina:
+
+- `arrival_date_year`
+- `arrival_date_month`
+- `arrival_date_day_of_month`
+
+em uma única coluna de data.
+
+O campo `arrival_date` facilita filtros temporais, agregações por período e a criação da `dim_date`. Em vez de trabalhar separadamente com ano, mês e dia, o modelo passa a possuir uma data única que pode ser relacionada à dimensão calendário.
+
+### `total_nights`
+
+```python
+df = create_total_nights(df)
+```
+
+Calcula o total de noites da reserva:
 
 ```text
-CSV
- ↓
-Python / ETL
- ↓
-Amazon Redshift
- ↓
+total_nights =
+stays_in_weekend_nights + stays_in_week_nights
+```
+
+Esse campo consolida as duas medidas originais de permanência em uma métrica única. Ele é utilizado para analisar volume de noites vendidas, duração média das reservas e também participa do cálculo da receita estimada.
+
+### `total_guests`
+
+```python
+df = create_total_guests(df)
+```
+
+Calcula o total de hóspedes:
+
+```text
+total_guests =
+adults + children + babies
+```
+
+A coluna permite analisar ocupação e quantidade de pessoas associadas às reservas sem precisar repetir a soma em cada consulta analítica.
+
+### `estimated_revenue`
+
+```python
+df = create_estimated_revenue(df)
+```
+
+Estima a receita associada à reserva a partir do ADR (`adr`) e da quantidade total de noites:
+
+```text
+estimated_revenue =
+adr × total_nights
+```
+
+Essa métrica transforma o valor diário da hospedagem em uma estimativa de receita por reserva e posteriormente permite calcular receita total e receita média no modelo analítico.
+
+Além de ser utilizada nas análises, a regra também é validada na etapa de Data Quality para garantir que o valor armazenado permaneça consistente com sua fórmula de origem.
+
+---
+
+## 🧪 Data Quality
+
+A qualidade dos dados é tratada em duas etapas: durante o ETL, para classificação e tratamento dos registros, e posteriormente no Redshift, para validar a integridade da tabela Silver.
+
+### Tratamento e classificação
+
+O objetivo não é simplesmente excluir registros suspeitos. Registros que apresentam problemas de qualidade são mantidos na Silver para rastreabilidade, mas classificados para impedir que contaminem as análises da camada Gold.
+
+Principais regras aplicadas:
+
+| Regra | Tratamento | Motivo |
+|---|---|---|
+| `adr < 0` | `INVALID_ADR` | ADR negativo não representa um valor válido de diária |
+| `adr > 5000` + reserva cancelada | `INVALID_EXTREME_ADR` | combinação considerada anômala para a análise |
+| `adults > 20` + `adr = 0` + reserva cancelada | `INVALID_EXTREME_OCCUPANCY` | identifica registros extremos de ocupação sem valor de diária |
+| adultos/crianças/bebês negativos | inválido estrutural | quantidade negativa não possui significado operacional |
+| noites/hóspedes negativos | inválido estrutural | viola a lógica básica das métricas derivadas |
+
+Valores como `adr = 0` e `adults = 0` não são automaticamente considerados inválidos, pois podem representar situações legítimas do dataset. A classificação foi baseada na combinação de atributos, evitando remover registros apenas por apresentarem um valor isoladamente incomum.
+
+### Validações da Silver
+
+A rotina de Data Quality também verifica:
+
+1. **Volume** — garante que a tabela não esteja vazia e monitora se a quantidade de registros está dentro do esperado.
+2. **Valores nulos** — verifica campos críticos como hotel, cancelamento, ano/mês de chegada e ADR.
+3. **Possíveis duplicidades** — compara uma combinação de atributos relevantes para identificar registros potencialmente duplicados.
+4. **Ranges e regras de negócio** — valida valores negativos e domínios esperados, como `is_canceled` limitado a `0` ou `1`.
+5. **Consistência** — verifica se os campos derivados continuam coerentes com suas origens:
+   - `total_nights = stays_in_weekend_nights + stays_in_week_nights`;
+   - `total_guests = adults + children + babies`;
+   - `estimated_revenue ≈ adr × total_nights`, considerando tolerância de `0,01`.
+
+Essas verificações evitam que erros estruturais ou inconsistências matemáticas avancem para a camada analítica.
+
+---
+
+## ⭐ Modelo dimensional Gold
+
+Os registros classificados como `VALID` são utilizados para construir a camada Gold em um modelo Star Schema.
+
+### Fact
+
+`fact_booking`
+
+Concentra as métricas e atributos transacionais das reservas, como:
+
+- `lead_time`
+- `total_nights`
+- `total_guests`
+- `adr`
+- `estimated_revenue`
+- `is_canceled`
+- `booking_changes`
+- `total_of_special_requests`
+
+### Dimensions
+
+- `dim_date` — calendário e atributos de data;
+- `dim_hotel` — hotel da reserva;
+- `dim_customer` — perfil do cliente;
+- `dim_room` — tipos de quarto reservado e atribuído;
+- `dim_channel` — segmento de mercado e canal de distribuição.
+
+Essa estrutura separa métricas de negócio das dimensões utilizadas para filtragem e agrupamento, facilitando as consultas analíticas e o consumo pelo Power BI.
+
+<img width="1536" height="1024" alt="star-schema" src="https://github.com/user-attachments/assets/6a2a06c4-e4f7-4f1c-bc59-60f8445e97e8" />
+
+
+---
+
+## 📊 Business Views
+
+Depois da construção da Gold, foram criadas cinco views no Redshift. Elas funcionam como uma camada semântica de negócio: organizam métricas e dimensões em estruturas voltadas diretamente às perguntas que o dashboard precisa responder.
+
+### `vw_booking_overview`
+
+Consolida os principais indicadores gerais da operação:
+
+- total de reservas;
+- reservas canceladas e confirmadas;
+- taxa de cancelamento;
+- total de hóspedes;
+- total de noites;
+- média de noites por reserva;
+- lead time médio;
+- ADR médio;
+- receita estimada total;
+- receita média por reserva.
+
+É a principal visão de **resumo executivo** e concentra os mesmos conceitos utilizados nos cards do Power BI.
+
+### `vw_booking_seasonality_hotel`
+
+Relaciona reservas com a dimensão de data e hotel para analisar:
+
+- reservas por mês;
+- cancelamentos;
+- taxa de cancelamento;
+- noites;
+- hóspedes;
+- ADR médio;
+- receita estimada.
+
+Essa view sustenta a análise de **sazonalidade e comportamento por hotel**.
+
+### `vw_booking_by_lead_time`
+
+Agrupa as reservas em faixas de antecedência:
+
+- `0-7`
+- `8-30`
+- `31-60`
+- `61-90`
+- `91-180`
+- `181+`
+
+Permite entender como o volume de reservas se distribui de acordo com o tempo entre a reserva e a chegada.
+
+### `vw_booking_by_channel`
+
+Agrupa as reservas por:
+
+- segmento de mercado;
+- canal de distribuição.
+
+Além do volume de reservas, permite comparar cancelamentos, noites, hóspedes, ADR e receita estimada.
+
+Essa visão é utilizada para a análise de **reservas por segmento/canal** no Power BI.
+
+### `vw_room_match`
+
+Compara o tipo de quarto originalmente reservado com o tipo de quarto efetivamente atribuído.
+
+Permite medir:
+
+- quantidade de reservas;
+- reservas com correspondência entre quarto reservado e atribuído;
+- alterações de quarto;
+- taxa de correspondência;
+- taxa de alteração.
+
+Essa visão permite identificar diferenças entre expectativa de reserva e alocação efetiva.
+
+---
+
+## 📈 Power BI e conexão com as Business Views
+
+O Power BI foi conectado ao modelo analítico do Amazon Redshift. O Star Schema fornece as relações entre fatos e dimensões, enquanto as Business Views organizam os principais recortes analíticos utilizados no dashboard.
+
+A relação entre as camadas pode ser resumida assim:
+
+```text
+Silver
+  ↓
+Gold / Star Schema
+  ↓
 Business Views
- ↓
-Power BI / Indicadores
+  ↓
+Power BI
 ```
 
-![Arquitetura do pipeline]<img width="2043" height="770" alt="architecture" src="https://github.com/user-attachments/assets/e95b2e41-9012-462b-bf55-174397dd5267" />
+### Indicadores principais
 
+Os cards do dashboard representam os principais indicadores definidos na `vw_booking_overview`:
 
-### Tecnologias
+| Indicador | Conceito no modelo | Relação com a View |
+|---|---|---|
+| **ADR Médio** | Média de `adr` | `vw_booking_overview.avg_adr` |
+| **Lead Time Médio** | Média de `lead_time` | `vw_booking_overview.avg_lead_time` |
+| **Receita Estimada** | Soma de `estimated_revenue` | `vw_booking_overview.total_estimated_revenue` |
+| **Room Nights Vendidas** | Soma de `total_nights` | `vw_booking_overview.total_nights` |
+| **Taxa de Cancelamento** | Cancelamentos / total de reservas | `vw_booking_overview.cancellation_rate` |
 
-- Python
-- Pandas
-- Boto3
-- SQL
-- SQLAlchemy
-- Amazon S3
-- Amazon Redshift Serverless
-- Power BI
+Assim, os indicadores do Power BI não são métricas isoladas: eles refletem as mesmas regras e métricas consolidadas na camada de negócio.
 
-## Camadas de dados
+### Visuais e suas respectivas análises
 
-### RAW
+Além dos cards, os gráficos do dashboard estão relacionados às demais views:
 
-O dataset original é armazenado no Amazon S3:
+| Visual do Power BI | Fonte conceitual | Objetivo |
+|---|---|---|
+| **Reservas por Mês** | `vw_booking_seasonality_hotel` | analisar sazonalidade |
+| **Total de Reservas por Hotel** | `vw_booking_seasonality_hotel` | comparar hotéis |
+| **Total de Reservas por Segmento** | `vw_booking_by_channel` | analisar origem/segmentação das reservas |
+| **Reservas por Lead Time** | `vw_booking_by_lead_time` | analisar antecedência das reservas |
 
-```text
-s3://hotel-booking-mmarighetti/raw/hotel_bookings.csv
-```
-
-A camada RAW mantém os dados na forma original.
-
-### ETL
-
-O processo em Python realiza:
-
-- leitura do CSV no S3;
-- padronização dos nomes das colunas;
-- tratamento de valores nulos;
-- conversão de tipos;
-- criação de campos derivados;
-- aplicação das regras de qualidade;
-- remoção de duplicidades exatas;
-- validação dos dados;
-- carga no Redshift.
-
-### Silver
-
-Tabela:
-
-```text
-hotel_bookings.silver
-```
-
-A Silver contém os dados tratados e também mantém registros classificados como inválidos quando necessário para rastreabilidade.
-
-Principais status de qualidade:
-
-| Status | Regra |
-|---|---|
-| `VALID` | Registro sem violação das regras definidas |
-| `INVALID_ADR` | `adr < 0` |
-| `INVALID_EXTREME_ADR` | `adr > 5000` e reserva cancelada |
-| `INVALID_EXTREME_OCCUPANCY` | `adults > 20`, `adr = 0` e reserva cancelada |
-
-Somente registros `VALID` são utilizados para construir a Gold.
-
-### Gold
-
-A Gold utiliza um modelo dimensional em Star Schema.
-
-![Modelo dimensional]<img width="1536" height="1024" alt="star-schema" src="https://github.com/user-attachments/assets/ac18de67-5d87-41f4-be50-5fdd92ed6cad" />
-
-
-Tabelas:
-
-```text
-dim_date
-dim_hotel
-dim_customer
-dim_room
-dim_channel
-fact_booking
-```
-
-A `fact_booking` concentra as métricas e eventos das reservas, enquanto as dimensões fornecem o contexto para análise.
-
-Relacionamentos:
-
-```text
-dim_date      1 ─── N fact_booking
-dim_hotel     1 ─── N fact_booking
-dim_customer  1 ─── N fact_booking
-dim_room      1 ─── N fact_booking
-dim_channel   1 ─── N fact_booking
-```
-
-# Indicadores
-
-Os indicadores foram construídos no Power BI utilizando medidas DAX sobre a `fact_booking`.
-
-## 1. ADR Médio
-
-### Objetivo de negócio
-
-Medir o valor médio da diária das reservas, permitindo acompanhar o nível de preço praticado.
-
-### Fórmula utilizada
-
-```text
-ADR Médio = Média do campo adr
-```
-
-DAX:
-
-```DAX
-ADR Médio =
-AVERAGE(fact_booking[adr])
-```
-
-### Query SQL
-
-```sql
-SELECT
-    AVG(adr) AS adr_medio
-FROM hotel_bookings.fact_booking;
-```
-
-### Interpretação dos resultados
-
-O dashboard apresenta um ADR médio de aproximadamente **106,29**.
-
-Esse indicador representa o valor médio de diária observado nas reservas consideradas na camada analítica.
+Os filtros de **período, tipo de cliente, hotel e canal de distribuição** utilizam as dimensões do Star Schema, permitindo que os indicadores e visuais sejam recalculados conforme o contexto selecionado.
 
 ---
 
-## 2. Lead Time Médio
+## 📊 Dashboard
 
-### Objetivo de negócio
+<img width="745" height="412" alt="dashboard" src="https://github.com/user-attachments/assets/b80bcc9c-1cbb-4687-ba49-3c88f7b9f2d7" />
 
-Medir com quantos dias de antecedência, em média, as reservas são realizadas.
 
-Esse indicador ajuda a entender o comportamento de planejamento dos clientes e o nível de antecedência da demanda.
+### Principais indicadores apresentados
 
-### Fórmula utilizada
-
-```text
-Lead Time Médio = Média do campo lead_time
-```
-
-DAX:
-
-```DAX
-Lead Time Médio =
-AVERAGE(fact_booking[lead_time])
-```
-
-### Query SQL
-
-```sql
-SELECT
-    AVG(lead_time) AS lead_time_medio
-FROM hotel_bookings.fact_booking;
-```
-
-### Interpretação dos resultados
-
-O dashboard apresenta um Lead Time Médio de aproximadamente **79,86 dias**.
-
-Isso significa que, em média, as reservas são realizadas cerca de 80 dias antes da data de chegada.
-
----
-
-## 3. Room Nights Vendidas
-
-### Objetivo de negócio
-
-Medir o volume total de noites comercializadas pelas reservas.
-
-Esse indicador é mais representativo do volume de hospedagem do que simplesmente contar reservas, pois considera a duração de cada estadia.
-
-### Fórmula utilizada
-
-```text
-Room Nights Vendidas = Soma de total_nights
-```
-
-DAX:
-
-```DAX
-Room Nights Vendidas =
-SUM(fact_booking[total_nights])
-```
-
-### Query SQL
-
-```sql
-SELECT
-    SUM(total_nights) AS room_nights_vendidas
-FROM hotel_bookings.fact_booking;
-```
-
-### Interpretação dos resultados
-
-O dashboard apresenta aproximadamente **317 mil Room Nights Vendidas**.
-
-Isso representa o volume acumulado de noites de hospedagem associado às reservas analisadas.
-
----
-
-## 4. Receita Estimada
-
-### Objetivo de negócio
-
-Estimar o valor de receita associado às reservas a partir da diária média e da quantidade de noites.
-
-### Fórmula utilizada
-
-A receita estimada é calculada no ETL:
-
-```text
-estimated_revenue = adr × total_nights
-```
-
-No Power BI:
-
-```DAX
-Receita Estimada =
-SUM(fact_booking[estimated_revenue])
-```
-
-### Query SQL
-
-```sql
-SELECT
-    SUM(estimated_revenue) AS receita_estimada
-FROM hotel_bookings.fact_booking;
-```
-
-### Interpretação dos resultados
-
-O dashboard apresenta aproximadamente **R$ 34,46 milhões** em receita estimada.
-
-O valor representa uma estimativa baseada no ADR e no total de noites, não necessariamente a receita financeira efetivamente recebida.
-
----
-
-## 5. Taxa de Cancelamento
-
-### Objetivo de negócio
-
-Medir a proporção de reservas canceladas em relação ao total de reservas.
-
-Esse indicador ajuda a acompanhar o nível de cancelamento da operação.
-
-### Fórmula utilizada
-
-```text
-Taxa de Cancelamento =
-Reservas canceladas / Total de reservas
-```
-
-DAX:
-
-```DAX
-Taxa de Cancelamento =
-DIVIDE(
-    CALCULATE(
-        COUNTROWS(fact_booking),
-        fact_booking[is_canceled] = 1
-    ),
-    COUNTROWS(fact_booking),
-    0
-)
-```
-
-### Query SQL
-
-```sql
-SELECT
-    100.0
-    * SUM(CASE WHEN is_canceled = 1 THEN 1 ELSE 0 END)
-    / NULLIF(COUNT(*), 0) AS taxa_cancelamento
-FROM hotel_bookings.fact_booking;
-```
-
-### Interpretação dos resultados
-
-O dashboard apresenta uma taxa de cancelamento de aproximadamente **27,48%**.
-
-Isso significa que cerca de 27 em cada 100 reservas analisadas estão classificadas como canceladas.
-
-# Dashboard
-
-O resultado final foi disponibilizado no Power BI com cinco indicadores principais, filtros e quatro análises complementares.
+- **ADR Médio:** R$ 106,29
+- **Lead Time Médio:** 79,86 dias
+- **Receita Estimada:** R$ 34,46 milhões
+- **Room Nights Vendidas:** 317 mil
+- **Taxa de Cancelamento:** 27,48%
 
 [📥 Baixar arquivo Power BI (.pbix)](./Hotel-Booking.pbix)
 
-![Dashboard Power BI]<img width="745" height="412" alt="dashboard" src="https://github.com/user-attachments/assets/93b9dd26-5c86-447e-befe-13fe552555df" />
+---
 
-
-### Indicadores
-
-- ADR Médio
-- Lead Time Médio
-- Room Nights Vendidas
-- Receita Estimada
-- Taxa de Cancelamento
-
-### Filtros
-
-- Período
-- Tipo de Cliente
-- Hotel
-- Canal de Distribuição
-
-### Análises
-
-- Reservas por mês
-- Reservas por hotel
-- Reservas por segmento
-- Reservas por faixa de Lead Time
-
-## Business Views
-
-Foram criadas cinco Business Views no schema `hotel_bookings`:
-
-| View | Objetivo |
-|---|---|
-| `vw_booking_overview` | Visão geral das reservas |
-| `vw_booking_seasonality_hotel` | Sazonalidade por hotel |
-| `vw_booking_by_lead_time` | Reservas por faixa de antecedência |
-| `vw_room_match` | Comparação entre quarto reservado e atribuído |
-| `vw_booking_by_channel` | Análise por canal |
-
-As Views complementam o modelo dimensional e disponibilizam análises já organizadas para consumo.
-
-## Data Quality
-
-A estratégia adotada foi manter rastreabilidade na Silver e impedir que registros classificados como inválidos contaminem a camada analítica.
-
-```text
-RAW
- ↓
-ETL + Data Quality
- ↓
-SILVER
- ├── VALID
- └── INVALID_*
-        ↓
-      GOLD
-        ↓
-   BUSINESS VIEWS
-        ↓
-      POWER BI
-```
-
-Os registros classificados como inválidos permanecem na Silver quando a regra possui finalidade de auditoria. A Gold utiliza somente registros `VALID`.
-
-## Estrutura do projeto
+## 📁 Estrutura do projeto
 
 ```text
 hotel-booking-pipeline/
-│
 ├── README.md
+├── Hotel-Booking.pbix
+├── data/
+│   └── hotel_bookings.csv
 ├── docs/
+│   ├── architecture.md
+│   ├── data_dictionary.md
+│   ├── data_quality.md
+│   ├── data_model.md
+│   └── business_views.md
 ├── sql/
 │   ├── star_schema/
+│   │   ├── create_dimensions.sql
+│   │   └── create_fact.sql
 │   └── views/
+│       ├── vw_booking_by_channel.sql
+│       ├── vw_booking_by_lead_time.sql
+│       ├── vw_booking_overview.sql
+│       ├── vw_booking_seasonality_hotel.sql
+│       └── vw_room_match.sql
 ├── src/
 │   ├── etl.py
 │   ├── data_quality_silver.py
 │   ├── gold.py
 │   ├── data_quality_gold.py
 │   └── create_views.py
-├── tests/
 ├── requirements.txt
-├── .env
 └── .gitignore
 ```
 
-## Execução
+---
 
-```bash
-python src/etl.py
-python src/data_quality_silver.py
-python src/gold.py
-python src/data_quality_gold.py
-python src/create_views.py
-```
+## 🛠️ Tecnologias
 
-Fluxo:
+- **Python** — ETL, transformação e validação;
+- **Pandas** — tratamento dos dados;
+- **SQLAlchemy / psycopg2** — conexão com Redshift;
+- **Amazon S3** — armazenamento dos dados RAW;
+- **Amazon Redshift Serverless** — Silver, Gold e Business Views;
+- **SQL** — modelagem e camada analítica;
+- **Power BI** — dashboard e análise dos indicadores;
+- **Git/GitHub** — versionamento do projeto.
 
-```text
-ETL
- ↓
-Silver
- ↓
-Data Quality
- ↓
-Gold
- ↓
-Business Views
- ↓
-Power BI
-```
+---
 
-## Resultado
+## ▶️ Execução
 
-O projeto implementa um fluxo completo de dados, desde a ingestão do dataset bruto até o consumo analítico, combinando tratamento de dados, regras de qualidade, modelagem dimensional, SQL analítico e visualização de indicadores de negócio.
+1. Configure as credenciais no `.env`.
+2. Execute o ETL para carregar e transformar os dados.
+3. Execute a rotina de Data Quality da Silver.
+4. Execute a construção da camada Gold.
+5. Execute a validação da Gold.
+6. Crie as Business Views.
+7. Conecte o Power BI ao Redshift.
+8. Atualize o modelo e o dashboard.
+
+---
+
+## 🔐 Segurança
+
+As credenciais de AWS e Redshift são armazenadas em `.env` e não fazem parte do repositório.
+
+O `.gitignore` também impede o versionamento de ambientes virtuais, arquivos compilados e configurações locais.
+
+---
+
+## 👤 Autor
+
+**Michelle Marighetti**
+
+Projeto desenvolvido como estudo prático de Engenharia de Dados, com foco em ETL, qualidade, modelagem dimensional, SQL analítico, AWS e BI.
